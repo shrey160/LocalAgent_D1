@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: dharampal
+Version: 0.1
+Requires-Dist: langchain
+Requires-Dist: langchain-openai
+Requires-Dist: langgraph
+Requires-Dist: customtkinter
+Requires-Dist: requests
+Dynamic: requires-dist

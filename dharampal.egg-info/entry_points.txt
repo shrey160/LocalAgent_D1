@@ -1,0 +1,2 @@
+[console_scripts]
+dharampal = dharampal.cli:main
