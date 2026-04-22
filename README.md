@@ -1,335 +1,581 @@
 # Dharampal
 
-A modular desktop AI agent for Windows, backed by a local LLM served by
-[LM Studio](https://lmstudio.ai) and orchestrated with
-[LangGraph](https://langchain-ai.github.io/langgraph/). A single command —
-`dharampal start` — brings up the model, connects the agent, and pops open a
-native chat window; `dharampal stop` tears everything down.
+A modular desktop AI agent for Windows that brings together a local LLM, intelligent web scraping, and a RAG-based memory system — all in a native chat interface.
 
-Phase 1 (current) ships a plain chat agent: no tools, no plugins, just a
-conversation with the local model. Later phases will add tool calling
-(starting with a Space News scraper) on top of the same scaffolding.
+**What it does:**
+- **Chat** with a local AI model (Google Gemma 4 via LM Studio)
+- **Fetch space news** from SpaceNews (cached locally for historical queries)
+- **Get trading news** from TradingEconomics (live, no caching)
+- **Search historical articles** using a local vector database (ChromaDB + Ollama embeddings)
+- **Control everything** from the command line: `dharampal start` and `dharampal stop`
 
----
-
-## Architecture at a glance
-
-| Layer | Tech | Role |
-|---|---|---|
-| LLM backend | LM Studio + `google/gemma-4-e4b` | OpenAI-compatible API at `http://localhost:1234/v1` |
-| Agent | LangGraph + LangChain (`ChatOpenAI`) | Holds conversation state, will bind tools later |
-| UI | `customtkinter` | Native desktop chat window with message history, input, status bar |
-| CLI | Python + `dharampal.bat` | `start` / `stop` lifecycle across the whole stack |
-
-The UI runs in its own detached process so closing the launching terminal
-doesn't kill the chat window. `dharampal stop` coordinates everything via a
-state file in `%TEMP%`.
+**Key features:**
+- 🤖 **Local LLM** — No API keys, no internet required for chat
+- 📰 **Smart News** — Fetches yesterday's + day before yesterday's space news automatically
+- 🔍 **RAG Search** — Ask for news from any date; searches local cache first, then scrapes if needed
+- 💼 **Trading Updates** — Live financial headlines from TradingEconomics
+- 💾 **Persistent Memory** — Articles stored in ChromaDB with Ollama embeddings
+- 🖥️ **Native UI** — Clean customtkinter chat window
+- ⚡ **Tool Routing** — LLM automatically decides which tool to use based on your question
 
 ---
 
-## Project structure
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Prerequisites](#prerequisites)
+3. [Installation](#installation)
+4. [Configuration](#configuration)
+5. [Usage](#usage)
+6. [Available Commands](#available-commands)
+7. [Tool Examples](#tool-examples)
+8. [Troubleshooting](#troubleshooting)
+9. [Development](#development)
+10. [Roadmap](#roadmap)
+
+---
+
+## Architecture
 
 ```
-C:\Shrey_Projs\dharampal_1\
-├── dharampal.bat               # Windows launcher on PATH — dispatches to the CLI
-├── setup.py                    # Package metadata + dependencies
-├── implementation_plan.md      # Original plan (Phase 1..N)
-├── README.md                   # This file
-├── venv\                       # Python virtual environment
-└── dharampal\                  # The actual Python package
-    ├── __init__.py
-    ├── cli.py                  # start / stop command implementation
-    ├── agent\
-    │   ├── __init__.py
-    │   └── graph.py            # LangGraph chat graph + get_response()
-    └── ui\
-        ├── __init__.py
-        └── chat_window.py      # customtkinter chat UI
+User Input (Chat UI)
+    |
+    v
++---------------------+
+|   LangGraph Agent   |
+|   (dharampal/agent) |
++---------------------+
+    |
+    +--> Tool Router (LLM decides)
+    |       |
+    |       +--> SpaceNews (cached in ChromaDB)
+    |       +--> TradingEconomics (live)
+    |       +--> Historical Search (ChromaDB RAG)
+    |       +--> List Sources (info)
+    |
+    +--> LLM Backend (LM Studio)
+    |
+    v
+User Output (Chat UI)
 ```
 
-### What each file does
+### Components
 
-**`dharampal.bat`** — One-line dispatcher. Cd's into its own directory,
-activates `venv\Scripts\activate.bat`, and invokes
-`python -m dharampal.cli start|stop`. Because it uses `%~dp0`, it works from
-any cwd as long as the folder containing it is on PATH.
-
-**`setup.py`** — Declares the package name, dependencies
-(`langchain`, `langchain-openai`, `langgraph`, `customtkinter`, `requests`),
-and a `dharampal` console-script entry point. `pip install -e .` reads this.
-
-**`dharampal/cli.py`** — The lifecycle controller.
-
-- `start()` — Starts LM Studio server (`lms server start`), kicks off
-  `lms load google/gemma-4-e4b --identifier friday-main --context-length 90000 --gpu off`
-  in the background, then spawns the UI in a **detached** process using
-  `pythonw.exe` (no console window) with `DETACHED_PROCESS |
-  CREATE_NEW_PROCESS_GROUP`. Persists the UI PID and model identifier to
-  `%TEMP%\dharampal.state` so a later `stop` call can find them.
-- `stop()` — Reads the state file, `taskkill /F /T /PID <ui_pid>` to close
-  the window, `lms unload friday-main`, `lms server stop`, then deletes the
-  state file. Works from any fresh terminal; doesn't need to be the same
-  cmd window that ran `start`.
-- Model + identifier constants (`MODEL_ID`, `IDENTIFIER`, `CONTEXT_LENGTH`,
-  `GPU_MODE`) live at the top of the file — change them there.
-- UI process stdout/stderr is captured to `%TEMP%\dharampal_ui.log` so
-  import errors or tracebacks from the silent `pythonw` process aren't lost.
-
-**`dharampal/agent/graph.py`** — The LangGraph definition.
-
-- Defines a minimal `State` with `messages` using `add_messages` reducer.
-- `get_model()` returns a `ChatOpenAI` client pointed at LM Studio's local
-  OpenAI-compatible endpoint (`http://localhost:1234/v1`), `model="friday-main"`,
-  `api_key="not-needed"` (LM Studio ignores it).
-- `chatbot(state)` node prepends a system message the first turn and calls
-  the model. Currently a single node; the tool-calling version in Phase 2
-  will add a conditional edge into a `ToolNode` here.
-- Compiles the graph with `MemorySaver()` so conversation history persists
-  across turns under `thread_id="1"`.
-- `get_response(user_input)` is the one-call helper the UI uses.
-
-**`dharampal/ui/chat_window.py`** — The customtkinter GUI.
-
-- Three-row layout: scrolling chat history (read-only `CTkTextbox`), input
-  row (`CTkEntry` + Send button), status bar (`CTkLabel`).
-- Input is **disabled at startup** until the model is reachable, so users
-  don't get confusing "connection refused" errors while LM Studio is still
-  loading the model.
-- `_wait_for_model()` polls `GET http://localhost:1234/v1/models` every 2s
-  (up to 10 minutes) until `friday-main` appears in the response.
-- Once ready, enables input, asks the agent for a one-line greeting, and
-  prints it. From there, Enter-to-send and clicking Send both fire
-  `get_response()` off on a background thread so the UI never freezes.
-- All `chat_history`/`status_label` writes go through `self.after(0, ...)`
-  so background threads never touch Tk widgets directly.
+| Component | File | Purpose |
+|-----------|------|---------|
+| **CLI Controller** | `dharampal/cli.py` | `start`/`stop` lifecycle management |
+| **Chat UI** | `dharampal/ui/chat_window.py` | customtkinter desktop interface |
+| **Agent Graph** | `dharampal/agent/graph.py` | LangGraph conversation + tool routing |
+| **Tool Registry** | `dharampal/tools/__init__.py` | Auto-discovery of all tools |
+| **Space Scraper** | `dharampal/tools/space_news.py` | SpaceNews archive (curl-based) |
+| **Trading Scraper** | `dharampal/tools/trading_news.py` | TradingEconomics headlines |
+| **RAG Search** | `dharampal/tools/news_search.py` | ChromaDB historical search |
+| **Web Scraper** | `dharampal/tools/news_scraper.py` | Fallback for historical dates |
+| **Sources Info** | `dharampal/tools/list_sources.py` | Show sources and cache status |
+| **Vector Store** | `dharampal/storage/chroma_store.py` | ChromaDB wrapper |
+| **Embeddings** | `dharampal/embeddings.py` | Ollama nomic-embed-text client |
 
 ---
 
 ## Prerequisites
 
-1. **Python 3.10+** on Windows with `py` / `python` on PATH.
-2. **LM Studio** installed, with the `lms` CLI available in your terminal.
-   Test with `lms --version`. If the command isn't found, open LM Studio →
-   Developer → install the CLI, or follow
-   [LM Studio's docs](https://lmstudio.ai/docs/cli).
-3. The model `google/gemma-4-e4b` downloaded in LM Studio (any compatible
-   Gemma build works — see *Changing the model* below if the exact string
-   isn't available).
+Before installing Dharampal, ensure you have:
+
+1. **Windows 10/11** with Python 3.10+ installed
+2. **LM Studio** installed with CLI access (`lms` command)
+3. **Ollama** installed for embeddings (`nomic-embed-text` model)
+4. **Git** (optional, for cloning)
+
+### Install LM Studio
+
+1. Download from [lmstudio.ai](https://lmstudio.ai)
+2. Install and open LM Studio
+3. Go to **Developer** → **Install LM Studio CLI** (or follow [CLI docs](https://lmstudio.ai/docs/cli))
+4. Verify in a new cmd window:
+   ```cmd
+   lms --version
+   ```
+
+### Install Ollama
+
+1. Download from [ollama.ai](https://ollama.ai)
+2. Install and verify:
+   ```cmd
+   ollama --version
+   ```
+3. Pull the embedding model:
+   ```cmd
+   ollama pull nomic-embed-text
+   ```
+
+### Download the AI Model
+
+1. Open LM Studio GUI
+2. Go to **Search** → Find `google/gemma-4-e4b` (or compatible Gemma model)
+3. Download it (several GB, may take time)
+4. Alternative models if gemma-4 is unavailable:
+   - `google/gemma-3-4b-it`
+   - `google/gemma-2-2b-it`
+   - Any model from `lms ls` output
 
 ---
 
-## First-time setup
+## Installation
 
-From the project root in a fresh `cmd`:
+### Step 1: Clone or Download the Project
 
+```cmd
+cd C:\Shrey_Projs
+git clone <repository-url> dharampal_1
+cd dharampal_1
 ```
-cd C:\Shrey_Projs\dharampal_1
+
+Or download and extract the ZIP, then navigate to the folder.
+
+### Step 2: Create Virtual Environment
+
+```cmd
 python -m venv venv
+```
+
+### Step 3: Activate Virtual Environment
+
+```cmd
 venv\Scripts\activate
+```
+
+Your prompt should now show `(venv)` at the beginning.
+
+### Step 4: Install Dependencies
+
+```cmd
 pip install -e .
 ```
 
-`pip install -e .` reads `setup.py` and installs `langchain`,
-`langchain-openai`, `langgraph`, `customtkinter`, `requests`, plus all
-their transitive deps (`typing_extensions`, `pydantic`, etc.), in editable
-mode so any code changes are picked up without reinstalling.
+This installs:
+- `langchain` + `langchain-openai` (LLM client)
+- `langgraph` (agent framework)
+- `customtkinter` (UI)
+- `requests` + `beautifulsoup4` (web scraping)
+- `chromadb` (vector database)
+- `dateparser` (natural language dates)
+- All transitive dependencies
 
-### Make `dharampal` runnable from any folder
+The `-e .` flag installs in "editable" mode, so code changes take effect immediately without reinstalling.
 
-Add `C:\Shrey_Projs\dharampal_1` to your **user PATH** so Windows can find
-`dharampal.bat` from anywhere.
+### Step 5: Add to PATH (Optional but Recommended)
 
-GUI route: Win → "environment variables" → *Edit the system environment
-variables* → *Environment Variables…* → under *User variables*, edit
-`Path`, add `C:\Shrey_Projs\dharampal_1`, OK everything. Open a fresh cmd.
+To run `dharampal` from any folder, add the project directory to your user PATH:
 
-PowerShell one-liner (same effect):
+**GUI Method:**
+1. Press `Win` → Search "environment variables"
+2. Click "Edit the system environment variables"
+3. Click "Environment Variables..."
+4. Under "User variables", find and select `Path`
+5. Click "Edit" → "New"
+6. Add: `C:\Shrey_Projs\dharampal_1`
+7. Click OK on all dialogs
+8. **Open a new cmd window** (old windows keep old PATH)
 
+**PowerShell Method:**
 ```powershell
 [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";C:\Shrey_Projs\dharampal_1", "User")
 ```
 
-> Do **not** use `setx PATH "%PATH%;..."` — it merges User + System PATH
-> and truncates at 1024 chars, which can corrupt PATH.
+> **Warning:** Do NOT use `setx PATH "%PATH%;..."` — it merges User + System PATH and can truncate at 1024 characters, corrupting your PATH.
 
-Verify from a new cmd window:
+### Step 6: Verify Installation
 
-```
+Open a **new** cmd window:
+
+```cmd
 where dharampal
 ```
 
-Should print `C:\Shrey_Projs\dharampal_1\dharampal.bat`.
-
----
-
-## Usage
-
-### Start
-
+Should output:
 ```
-dharampal start
+C:\Shrey_Projs\dharampal_1\dharampal.bat
 ```
 
-Expected console output:
-
-```
-=== Dharampal: start ===
-Starting LM Studio server...
-Loading model google/gemma-4-e4b as 'friday-main' (may take a while on first run)...
-Chat window launched (PID 12345).
-UI log: C:\Users\Shrey\AppData\Local\Temp\dharampal_ui.log  (check this file if no window appears)
-The window will show 'waiting for model' until LM Studio finishes loading.
-Run 'dharampal stop' when you're done.
+Test the package import:
+```cmd
+cd C:\Shrey_Projs\dharampal_1
+venv\Scripts\activate
+python -c "from dharampal.agent.graph import get_response; print('OK')"
 ```
 
-A chat window opens. The Send button and input box are disabled at first
-and the status bar shows *"LM Studio reachable, waiting for 'friday-main'
-to load… (attempt N)"*. Once the model finishes loading the input enables
-itself and Dharampal greets you.
-
-### Stop
-
-```
-dharampal stop
-```
-
-Works from any fresh terminal — it reads `%TEMP%\dharampal.state` to find
-the UI PID:
-
-```
-=== Dharampal: stop ===
-Closed chat window (PID 12345).
-Unloading model 'friday-main'...
-Stopping LM Studio server...
-Dharampal stopped.
-```
-
-You can also just close the chat window's X button — the LM Studio server
-and model will keep running in the background until you run
-`dharampal stop` (that's intentional: stopping the server is a slow
-operation so we let the user decide when to do it).
+Should print `OK` with no errors.
 
 ---
 
 ## Configuration
 
-All tunable constants live at the top of `dharampal/cli.py`:
+All tunable settings are in `dharampal/cli.py`:
 
 ```python
-MODEL_ID = "google/gemma-4-e4b"
-IDENTIFIER = "friday-main"
-CONTEXT_LENGTH = "90000"
-GPU_MODE = "off"
+MODEL_ID = "google/gemma-4-e4b"      # Model identifier in LM Studio
+IDENTIFIER = "friday-main"            # Custom name for loaded model
+CONTEXT_LENGTH = "90000"              # Token context window
+GPU_MODE = "off"                      # Set to "on" if you have GPU
 ```
 
-If you change `IDENTIFIER`, also update `MODEL_IDENTIFIER` in
-`dharampal/ui/chat_window.py` so the readiness poll looks for the right
-entry.
+If you change `IDENTIFIER`, also update `MODEL_IDENTIFIER` in `dharampal/ui/chat_window.py`.
 
-### Changing the model
+### Changing the Model
 
-`google/gemma-4-e4b` is the string from the original plan. If LM Studio
-can't find it (Gemma 4 wasn't a real release at the time of writing), pick
-any installed OpenAI-compatible model and update `MODEL_ID` — common
-substitutes:
+If `google/gemma-4-e4b` isn't available:
 
-- `google/gemma-3-4b-it`
-- `google/gemma-2-2b-it`
-- whatever shows up in `lms ls`
+1. Check available models:
+   ```cmd
+   lms ls
+   ```
+2. Update `MODEL_ID` in `cli.py` with any installed model
+3. Update `MODEL_IDENTIFIER` in `chat_window.py` if you changed `IDENTIFIER`
 
-### State files
+---
 
-| File | Purpose |
-|---|---|
-| `%TEMP%\dharampal.state` | UI PID + model identifier; written by `start`, read by `stop`. |
-| `%TEMP%\dharampal_ui.log` | stdout/stderr of the detached UI process. Check this first if the window never appears. |
+## Usage
+
+### Start the Agent
+
+```cmd
+dharampal start
+```
+
+Expected output:
+```
+=== Dharampal: start ===
+Starting LM Studio server...
+Loading model google/gemma-4-e4b as 'friday-main'...
+Chat window launched (PID 12345).
+UI log: C:\Users\YourName\AppData\Local\Temp\dharampal_ui.log
+The window will show 'waiting for model' until LM Studio finishes loading.
+Run 'dharampal stop' when you're done.
+```
+
+A chat window opens. The input is disabled until the model loads (usually 10-30 seconds).
+
+### Stop the Agent
+
+```cmd
+dharampal stop
+```
+
+Or simply close the chat window — LM Studio keeps running in the background until you run `stop`.
+
+---
+
+## Available Commands
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `dharampal start` | Start LM Studio, load model, launch chat UI |
+| `dharampal stop` | Close UI, unload model, stop LM Studio server |
+| `dharampal --help` | Show help message |
+
+### Chat Commands (Type in UI)
+
+The agent understands natural language. No special commands needed — just ask:
+
+| What you type | What happens |
+|---------------|--------------|
+| "Get daily news" | Fetches yesterday + day before yesterday's space news |
+| "Trading news" | Live financial headlines from TradingEconomics |
+| "News for April 21st" | Searches local cache first, offers to scrape if empty |
+| "Show sources" | Lists all sources and cache status |
+| "What satellites launched recently?" | General chat with the LLM |
+
+---
+
+## Tool Examples
+
+### Daily Space News
+
+**You:** Get me the daily news
+
+**Dharampal:**
+```
+SpaceNews articles from April 22, 2026:
+
+1. NASA sets early September launch date for Roman Space Telescope
+   Date: April 22, 2026
+   Excerpt: NASA's Nancy Grace Roman Space Telescope is now scheduled for launch...
+   URL: https://spacenews.com/...
+
+2. Commerce Department budget proposal would halt work on TraCSS
+   Date: April 22, 2026
+   URL: https://spacenews.com/...
+
+SpaceNews articles from April 21, 2026:
+
+1. Northrop Grumman takes $71 million charge on Vulcan booster issue
+   Date: April 21, 2026
+   URL: https://spacenews.com/...
+
+(I've saved 8 article(s) to my local memory.)
+```
+
+### Trading News
+
+**You:** Show me trading news
+
+**Dharampal:**
+```
+Trading Economics Headlines:
+
+1. US Stocks Approach Records
+   US equities rose on Wednesday, rebounding from earlier losses...
+
+Source: https://tradingeconomics.com/
+(These headlines are live and not cached.)
+```
+
+### Historical Search (with RAG fallback)
+
+**You:** Get me news for April 21st
+
+**Dharampal:**
+```
+Here are the space news articles I have cached for April 21, 2026:
+
+1. Northrop Grumman takes $71 million charge on Vulcan booster issue
+   Northrop Grumman has announced a $71 million charge...
+   https://spacenews.com/...
+
+2. Trump taps Raytheon executive for top military space acquisition post
+   ...
+
+Would you like me to check SpaceNews online for more articles from that date?
+```
+
+**You:** yes
+
+**Dharampal:**
+```
+SpaceNews articles from April 21, 2026:
+
+1. [Additional article not in cache]
+   ...
+
+(I've saved 2 new article(s) to my local memory.)
+```
+
+### List Sources
+
+**You:** Show me the sources
+
+**Dharampal:**
+```
+NEWS SOURCES
+
+Available Sources:
+--------------------------------------------------
+
+SpaceNews:
+  URL: https://spacenews.com/section/news-archive/
+  Description: Space industry news and articles
+  Cached locally: [YES]
+
+TradingEconomics:
+  URL: https://tradingeconomics.com/
+  Description: Financial markets and economic indicators
+  Cached locally: [NO] (live only)
+
+Local Cache Status (RAG Database):
+--------------------------------------------------
+Total cached articles: 8
+
+Cached dates: April 22, 2026, April 21, 2026
+
+Usage Notes:
+--------------------------------------------------
+- 'Daily news' -> SpaceNews (yesterday + day before)
+- 'Trading news' -> TradingEconomics (live, not cached)
+- 'News for [date]' -> Searches cache first, then scrapes if needed
+```
 
 ---
 
 ## Troubleshooting
 
-**`'dharampal' is not recognized as an internal or external command`**
-PATH doesn't include the project folder. See *Make dharampal runnable from
-any folder* above. Remember to open a fresh cmd — already-open windows
-keep the old PATH.
+### `'dharampal' is not recognized`
 
-**`ModuleNotFoundError: No module named 'typing_extensions'` (or customtkinter, or requests)**
-Venv isn't fully set up. From the project root:
+**Cause:** PATH doesn't include the project folder.
 
-```
+**Fix:** Add `C:\Shrey_Projs\dharampal_1` to your user PATH (see Step 5 in Installation). Open a **new** cmd window after changing PATH.
+
+### `ModuleNotFoundError: No module named 'X'`
+
+**Cause:** Virtual environment not activated or dependencies not installed.
+
+**Fix:**
+```cmd
+cd C:\Shrey_Projs\dharampal_1
 venv\Scripts\activate
 pip install -e .
 ```
 
-**`dharampal start` prints "Chat window launched" but nothing appears**
-The detached UI process crashed silently. Open
-`%TEMP%\dharampal_ui.log` — the traceback is there. For an even faster
-diagnosis, run the UI in the foreground with a visible console:
+### `dharampal start` prints "Chat window launched" but no window appears
 
+**Cause:** The detached UI process crashed silently.
+
+**Fix:** Check the log file:
+```cmd
+type %TEMP%\dharampal_ui.log
 ```
+
+Or run the UI in the foreground for visible tracebacks:
+```cmd
 venv\Scripts\activate
 python -m dharampal.ui.chat_window
 ```
 
-**Status bar stuck on "LM Studio not reachable yet, retrying…"**
-Either LM Studio server didn't start (is `lms` on PATH?) or your model is
-still downloading/loading. `lms ps` from another cmd shows what's loaded.
-First load of a multi-GB model can take minutes.
+### Status bar stuck on "LM Studio not reachable yet"
 
-**Chat window opens but greeting fails with a model error**
-The model loaded under a different identifier than `friday-main`. Check
-`lms ps` — if you see a different name, either restart via
-`dharampal stop && dharampal start`, or update `IDENTIFIER` /
-`MODEL_IDENTIFIER` to match.
+**Cause:** LM Studio server didn't start or model is still loading.
 
-**`dharampal stop` doesn't close the window**
-The state file is stale (e.g. Windows was rebooted). Close the window
-manually with its X, then run `lms ps` and `lms unload <name>` by hand.
-Delete `%TEMP%\dharampal.state` to reset.
+**Fix:**
+1. Check if `lms` is on PATH: `lms --version`
+2. Check loaded models: `lms ps`
+3. First load of a multi-GB model can take 5-10 minutes
+4. Check LM Studio GUI for errors
+
+### Chat window opens but greeting fails with model error
+
+**Cause:** Model loaded under a different identifier.
+
+**Fix:**
+```cmd
+lms ps
+```
+
+If you see a different name, update `IDENTIFIER` in `cli.py` and `MODEL_IDENTIFIER` in `chat_window.py` to match.
+
+### `dharampal stop` doesn't close the window
+
+**Cause:** State file is stale (e.g., after Windows reboot).
+
+**Fix:**
+1. Close the window manually with X
+2. Run: `lms ps` and `lms unload friday-main`
+3. Delete the state file: `del %TEMP%\dharampal.state`
+
+### No articles found when scraping
+
+**Cause:** SpaceNews may be temporarily blocking requests.
+
+**Fix:** Wait a few minutes and try again. The tool uses curl which is more reliable than Python requests.
 
 ---
 
 ## Development
 
-The package is installed in editable mode (`pip install -e .`), so edits
-to `dharampal/**.py` take effect the next time you run `dharampal start`.
-No reinstall needed.
+### Project Structure
 
-Run the agent logic without the GUI (useful for debugging the graph):
+```
+dharampal_1/
+├── dharampal/
+│   ├── cli.py              # CLI lifecycle controller
+│   ├── embeddings.py       # Ollama embedding client
+│   ├── agent/
+│   │   └── graph.py        # LangGraph + tool binding
+│   ├── ui/
+│   │   └── chat_window.py  # customtkinter interface
+│   ├── storage/
+│   │   └── chroma_store.py # ChromaDB wrapper
+│   └── tools/
+│       ├── __init__.py     # Tool registry
+│       ├── space_news.py   # SpaceNews scraper
+│       ├── trading_news.py # TradingEconomics scraper
+│       ├── news_search.py  # RAG search
+│       ├── news_scraper.py # Historical scraper
+│       └── list_sources.py # Sources info
+├── notebook/
+│   └── test_tools.ipynb    # Jupyter test notebook
+├── data/                   # ChromaDB storage (auto-created)
+├── setup.py                # Package configuration
+└── dharampal.bat          # Windows launcher
+```
 
-```python
+### Running Tests
+
+Use the Jupyter notebook for testing individual tools:
+
+```cmd
 venv\Scripts\activate
-python -c "from dharampal.agent.graph import get_response; print(get_response('hi'))"
+jupyter notebook notebook/test_tools.ipynb
 ```
 
-Run the GUI directly with a visible console (for tracebacks):
+### Test Agent Without UI
 
+```cmd
+venv\Scripts\activate
+python -c "from dharampal.agent.graph import get_response; print(get_response('hello'))"
 ```
-python -m dharampal.ui.chat_window
+
+### Test Individual Tool
+
+```cmd
+venv\Scripts\activate
+python -c "from dharampal.tools.space_news import space_news_tool; print(space_news_tool.invoke({}))"
 ```
+
+### Adding a New Tool
+
+1. Create a new file in `dharampal/tools/`:
+   ```python
+   from langchain_core.tools import tool
+   
+   @tool
+   def my_new_tool() -> str:
+       """Description for the LLM."""
+       return "Result"
+   ```
+
+2. Register it in `dharampal/tools/__init__.py`:
+   ```python
+   from dharampal.tools.my_new_tool import my_new_tool
+   ALL_TOOLS = [..., my_new_tool]
+   ```
+
+3. The agent automatically discovers it via `ALL_TOOLS`.
 
 ---
 
 ## Roadmap
 
-Tracked in `implementation_plan.md`. Next phases:
+### Completed (Phase 1-2)
+- ✅ Core chat agent with LangGraph
+- ✅ customtkinter UI with model polling
+- ✅ CLI start/stop lifecycle
+- ✅ SpaceNews scraper with ChromaDB caching
+- ✅ TradingEconomics live scraper
+- ✅ RAG-based historical search
+- ✅ Tool registry system
+- ✅ Ollama embeddings
+- ✅ Anti-hallucination prompts
 
-1. **Phase 2 — Tools & Space News scraper.**
-   - `dharampal/tools/space_news.py`: `requests` + `BeautifulSoup` scraper
-     targeting `https://spacenews.com/section/news-archive/`, filtered to
-     today + yesterday by parsed publish dates, wrapped as a LangChain
-     `@tool`.
-   - `graph.py`: bind tools to the model, add a `ToolNode` and a
-     conditional edge from the chatbot to the tool executor and back.
-2. **Phase 3 — Plugin/tool registry.** Discover tool modules under
-   `dharampal/tools/` at startup so adding a new capability is a matter of
-   dropping in a file.
-3. **Phase 4 — UX polish.** Streaming token-by-token output in the chat
-   window, model picker in the UI, conversation history persistence
-   across `stop`/`start`.
+### Planned (Phase 3+)
+- 🔄 Auto-discovery of tools from filesystem
+- 🔄 Streaming token output in UI
+- 🔄 Model picker dropdown
+- 🔄 Conversation history persistence
+- 🔄 Additional news sources
+- 🔄 Background scheduled scraping
+- 🔄 Article summarization
 
 ---
 
 ## License
 
-Personal project; no license specified yet.
+Personal project — no license specified yet.
+
+## Support
+
+For issues or questions:
+- Check [Troubleshooting](#troubleshooting) above
+- Review the [Implementation Plan](implementation_plan.md) for architecture details
+- Check `%TEMP%\dharampal_ui.log` for UI errors
+- Run tools individually in `notebook/test_tools.ipynb`
