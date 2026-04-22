@@ -1,102 +1,335 @@
-"""Dharampal chat window.
+"""Dharampal modern chat window.
 
-A minimal customtkinter chat UI. On startup it polls LM Studio until the
-model identified as `friday-main` is ready, then asks the agent for a
-short greeting. The user input is disabled until the model is reachable
-so we don't surface confusing "connection refused" errors.
+A clean, modern customtkinter chat UI with message bubbles, dark theme,
+and smooth interactions. On startup it polls LM Studio until the model is
+ready, then greets the user.
+
+Design notes (for reviewer):
+- Dark theme by default for a modern look
+- Message bubbles instead of plain text
+- Color-coded: user (blue), AI (green), system (gray), error (red)
+- Header bar with status indicator
+- Smooth auto-scroll
+- Loading animation when AI is thinking
+- Clear chat button
 """
 
 import threading
 import time
+from datetime import datetime
 
 import customtkinter as ctk
 
 try:
     import requests
-except ImportError:  # pragma: no cover - requests is a declared dep
+except ImportError:
     requests = None
 
 from dharampal.agent.graph import get_response
 
 LM_STUDIO_URL = "http://localhost:1234/v1"
 MODEL_IDENTIFIER = "friday-main"
-READINESS_TIMEOUT_SECONDS = 600  # give slow first-time model loads room to finish
+READINESS_TIMEOUT_SECONDS = 600
+
+# Color scheme
+COLORS = {
+    "bg": "#1a1a2e",  # Deep dark blue background
+    "bg_secondary": "#16213e",  # Slightly lighter for frames
+    "user_bubble": "#0f3460",  # Dark blue for user
+    "ai_bubble": "#1a472a",  # Dark green for AI
+    "system_bubble": "#2d2d2d",  # Gray for system
+    "error_bubble": "#5c1a1a",  # Dark red for errors
+    "text_primary": "#eaeaea",  # Primary text
+    "text_secondary": "#a0a0a0",  # Secondary/muted text
+    "accent": "#e94560",  # Pink accent
+    "input_bg": "#0f0f23",  # Input background
+    "status_ready": "#4ade80",  # Green dot
+    "status_busy": "#fbbf24",  # Yellow/orange dot
+    "status_offline": "#ef4444",  # Red dot
+}
 
 
-class ChatWindow(ctk.CTk):
+class ModernChatWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Dharampal AI Agent")
-        self.geometry("720x820")
 
-        self.grid_rowconfigure(0, weight=1)
+        # Window setup
+        self.title("Dharampal")
+        self.geometry("900x750")
+        self.minsize(600, 400)
+        self.configure(fg_color=COLORS["bg"])
+
+        # Configure grid
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Chat history (read-only)
-        self.chat_history = ctk.CTkTextbox(
-            self, state="disabled", wrap="word", font=("Segoe UI", 13)
+        # --- Header Bar ---
+        self.header = ctk.CTkFrame(self, fg_color=COLORS["bg_secondary"], height=50)
+        self.header.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        self.header.grid_propagate(False)
+
+        # App title
+        self.title_label = ctk.CTkLabel(
+            self.header,
+            text="Dharampal",
+            font=("Segoe UI", 16, "bold"),
+            text_color=COLORS["text_primary"],
         )
-        self.chat_history.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        self.title_label.pack(side="left", padx=20, pady=10)
 
-        # Input row
-        self.input_frame = ctk.CTkFrame(self)
-        self.input_frame.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        # Status indicator frame
+        self.status_frame = ctk.CTkFrame(self.header, fg_color="transparent")
+        self.status_frame.pack(side="right", padx=20, pady=10)
 
+        # Status dot
+        self.status_dot = ctk.CTkLabel(
+            self.status_frame,
+            text="●",
+            font=("Segoe UI", 12),
+            text_color=COLORS["status_offline"],
+        )
+        self.status_dot.pack(side="left", padx=(0, 5))
+
+        # Status text
+        self.status_text = ctk.CTkLabel(
+            self.status_frame,
+            text="Connecting...",
+            font=("Segoe UI", 11),
+            text_color=COLORS["text_secondary"],
+        )
+        self.status_text.pack(side="left")
+
+        # Clear button
+        self.clear_btn = ctk.CTkButton(
+            self.header,
+            text="Clear",
+            font=("Segoe UI", 11),
+            width=60,
+            height=28,
+            fg_color="transparent",
+            hover_color=COLORS["bg"],
+            command=self.clear_chat,
+        )
+        self.clear_btn.pack(side="right", padx=(0, 10), pady=10)
+
+        # --- Chat Area ---
+        self.chat_container = ctk.CTkFrame(self, fg_color=COLORS["bg"])
+        self.chat_container.grid(row=1, column=0, sticky="nsew", padx=15, pady=10)
+        self.chat_container.grid_rowconfigure(0, weight=1)
+        self.chat_container.grid_columnconfigure(0, weight=1)
+
+        # Scrollable frame for messages
+        self.chat_scroll = ctk.CTkScrollableFrame(
+            self.chat_container,
+            fg_color=COLORS["bg"],
+            scrollbar_button_color=COLORS["bg_secondary"],
+            scrollbar_button_hover_color=COLORS["user_bubble"],
+        )
+        self.chat_scroll.grid(row=0, column=0, sticky="nsew")
+        self.chat_scroll.grid_columnconfigure(0, weight=1)
+
+        # Messages list to track widgets
+        self.messages = []
+
+        # --- Input Area ---
+        self.input_frame = ctk.CTkFrame(
+            self, fg_color=COLORS["bg_secondary"], height=70
+        )
+        self.input_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 15))
+        self.input_frame.grid_propagate(False)
+        self.input_frame.grid_columnconfigure(0, weight=1)
+
+        # Input field
         self.entry = ctk.CTkEntry(
             self.input_frame,
-            placeholder_text="Waiting for model to load...",
+            placeholder_text="Waiting for model...",
             font=("Segoe UI", 13),
+            fg_color=COLORS["input_bg"],
+            border_color=COLORS["bg_secondary"],
+            border_width=1,
+            corner_radius=20,
+            height=40,
         )
-        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=6)
+        self.entry.grid(row=0, column=0, padx=(15, 10), pady=15, sticky="ew")
         self.entry.bind("<Return>", self.send_message)
         self.entry.configure(state="disabled")
 
+        # Send button
         self.send_btn = ctk.CTkButton(
-            self.input_frame, text="Send", command=self.send_message, width=100
+            self.input_frame,
+            text="➤",
+            font=("Segoe UI", 16),
+            width=40,
+            height=40,
+            corner_radius=20,
+            fg_color=COLORS["accent"],
+            hover_color="#d63d56",
+            command=self.send_message,
         )
-        self.send_btn.pack(side="right")
+        self.send_btn.grid(row=0, column=1, padx=(0, 15), pady=15)
         self.send_btn.configure(state="disabled")
 
-        # Status bar
-        self.status_label = ctk.CTkLabel(
-            self, text="Connecting to LM Studio...", anchor="w", font=("Segoe UI", 11)
-        )
-        self.status_label.grid(row=2, column=0, padx=20, pady=(0, 12), sticky="ew")
-
-        self.append_message(
-            "System",
-            "Dharampal is starting up. Waiting for LM Studio to finish loading the model...",
+        # Show initial system message
+        self.add_system_message(
+            "Dharampal is starting up. Waiting for LM Studio to load the model..."
         )
 
+        # Start background thread
         threading.Thread(target=self._startup_sequence, daemon=True).start()
 
-    # --- UI helpers --------------------------------------------------------
+    # --- Message Display ---
 
-    def append_message(self, sender, text):
-        self.after(0, self._append_message_internal, sender, text)
+    def add_message(self, sender, text, msg_type="ai"):
+        """Add a message bubble to the chat."""
+        self.after(0, self._add_message_internal, sender, text, msg_type)
 
-    def _append_message_internal(self, sender, text):
-        self.chat_history.configure(state="normal")
-        self.chat_history.insert("end", f"{sender}: {text}\n\n")
-        self.chat_history.configure(state="disabled")
-        self.chat_history.see("end")
+    def _add_message_internal(self, sender, text, msg_type):
+        # Container frame for the message
+        msg_frame = ctk.CTkFrame(self.chat_scroll, fg_color="transparent")
+        msg_frame.grid(
+            row=len(self.messages), column=0, sticky="ew", pady=(5, 5), padx=5
+        )
+        msg_frame.grid_columnconfigure(0, weight=1)
 
-    def set_status(self, text):
-        self.after(0, lambda: self.status_label.configure(text=text))
+        # Timestamp
+        timestamp = datetime.now().strftime("%H:%M")
+
+        # Determine alignment and colors based on message type
+        if msg_type == "user":
+            bubble_color = COLORS["user_bubble"]
+            align = "e"
+            sender_text = "You"
+            sender_color = COLORS["accent"]
+        elif msg_type == "system":
+            bubble_color = COLORS["system_bubble"]
+            align = "center"
+            sender_text = "System"
+            sender_color = COLORS["text_secondary"]
+        elif msg_type == "error":
+            bubble_color = COLORS["error_bubble"]
+            align = "w"
+            sender_text = "Error"
+            sender_color = COLORS["status_offline"]
+        else:  # ai
+            bubble_color = COLORS["ai_bubble"]
+            align = "w"
+            sender_text = "Dharampal"
+            sender_color = COLORS["status_ready"]
+
+        # Inner frame for alignment
+        inner_frame = ctk.CTkFrame(msg_frame, fg_color="transparent")
+        inner_frame.grid(row=0, column=0, sticky=align)
+
+        # Sender label (only for user and AI, not system)
+        if msg_type != "system":
+            sender_label = ctk.CTkLabel(
+                inner_frame,
+                text=f"{sender_text}  •  {timestamp}",
+                font=("Segoe UI", 9),
+                text_color=sender_color,
+            )
+            sender_label.pack(anchor=align, padx=10, pady=(0, 2))
+
+        # Message bubble
+        bubble = ctk.CTkFrame(
+            inner_frame,
+            fg_color=bubble_color,
+            corner_radius=15,
+        )
+        bubble.pack(anchor=align, padx=5, pady=(0, 5))
+
+        # Message text
+        msg_label = ctk.CTkLabel(
+            bubble,
+            text=text,
+            font=("Segoe UI", 12),
+            text_color=COLORS["text_primary"],
+            wraplength=500 if msg_type in ["user", "ai"] else 600,
+            justify="left" if msg_type in ["user", "ai", "error"] else "center",
+        )
+        msg_label.pack(padx=15, pady=10)
+
+        # Store reference
+        self.messages.append(msg_frame)
+
+        # Auto-scroll to bottom
+        self.after(100, self._scroll_to_bottom)
+
+    def add_user_message(self, text):
+        """Add a user message."""
+        self.add_message("You", text, "user")
+
+    def add_ai_message(self, text):
+        """Add an AI message."""
+        self.add_message("Dharampal", text, "ai")
+
+    def add_system_message(self, text):
+        """Add a system message."""
+        self.add_message("System", text, "system")
+
+    def add_error_message(self, text):
+        """Add an error message."""
+        self.add_message("Error", text, "error")
+
+    def _scroll_to_bottom(self):
+        """Scroll to the latest message."""
+        if self.messages:
+            self.messages[-1].update_idletasks()
+            self.chat_scroll._parent_canvas.yview_moveto(1.0)
+
+    def clear_chat(self):
+        """Clear all messages."""
+        for msg in self.messages:
+            msg.destroy()
+        self.messages.clear()
+        self.add_system_message("Chat cleared.")
+
+    # --- Status Management ---
+
+    def set_status(self, text, status_type="busy"):
+        """Update status with color-coded indicator."""
+        self.after(0, self._set_status_internal, text, status_type)
+
+    def _set_status_internal(self, text, status_type):
+        self.status_text.configure(text=text)
+
+        if status_type == "ready":
+            color = COLORS["status_ready"]
+        elif status_type == "busy":
+            color = COLORS["status_busy"]
+        elif status_type == "error":
+            color = COLORS["status_offline"]
+        else:
+            color = COLORS["text_secondary"]
+
+        self.status_dot.configure(text_color=color)
 
     def _enable_input(self):
+        """Enable input field and button."""
+
         def _do():
-            self.entry.configure(state="normal", placeholder_text="Type your message...")
+            self.entry.configure(
+                state="normal", placeholder_text="Type your message..."
+            )
             self.send_btn.configure(state="normal")
             self.entry.focus_set()
+
         self.after(0, _do)
 
-    # --- readiness + greeting ---------------------------------------------
+    def _disable_input(self):
+        """Disable input field and button."""
+
+        def _do():
+            self.entry.configure(state="disabled")
+            self.send_btn.configure(state="disabled")
+
+        self.after(0, _do)
+
+    # --- Startup Sequence ---
 
     def _wait_for_model(self, timeout=READINESS_TIMEOUT_SECONDS):
-        """Poll LM Studio's /v1/models endpoint until our identifier appears."""
+        """Poll LM Studio until model is ready."""
         if requests is None:
-            # Fall back to time-based wait if requests isn't available.
             time.sleep(5)
             return True
 
@@ -111,72 +344,86 @@ class ChatWindow(ctk.CTk):
                     ids = [m.get("id", "") for m in data]
                     if any(MODEL_IDENTIFIER in mid for mid in ids):
                         return True
-                    self.set_status(
-                        f"LM Studio reachable, waiting for '{MODEL_IDENTIFIER}' to load... (attempt {attempt})"
-                    )
+                    self.set_status(f"Loading model... (attempt {attempt})", "busy")
                 else:
                     self.set_status(
-                        f"LM Studio responded with status {r.status_code}, retrying..."
+                        f"Server responded {r.status_code}, retrying...", "busy"
                     )
             except Exception:
                 self.set_status(
-                    f"LM Studio not reachable yet, retrying... (attempt {attempt})"
+                    f"Connecting to LM Studio... (attempt {attempt})", "busy"
                 )
             time.sleep(2)
         return False
 
     def _startup_sequence(self):
+        """Initialize the agent and show greeting."""
         ready = self._wait_for_model()
+
         if not ready:
-            self.set_status("Timed out waiting for the model. You can still try sending a message.")
-            self.append_message(
-                "System",
-                "Model did not become ready in time. Input is enabled — requests may still fail.",
+            self.set_status("Model timeout — check LM Studio", "error")
+            self.add_error_message(
+                "Model did not become ready in time. Input is enabled but may fail."
             )
             self._enable_input()
             return
 
-        self.set_status(f"Model '{MODEL_IDENTIFIER}' ready.")
+        self.set_status(f"Ready", "ready")
         self._enable_input()
+
         try:
             greeting = get_response(
                 "Greet the user briefly as Dharampal, a helpful AI assistant. One or two sentences."
             )
-            self.append_message("Dharampal", greeting)
+            self.add_ai_message(greeting)
         except Exception as e:
-            self.append_message("System", f"Could not fetch greeting: {e}")
+            self.add_error_message(f"Could not fetch greeting: {e}")
 
-    # --- send / receive ----------------------------------------------------
+    # --- Message Handling ---
 
     def send_message(self, event=None):
+        """Send user message and get AI response."""
         if str(self.send_btn.cget("state")) == "disabled":
             return
+
         user_text = self.entry.get().strip()
         if not user_text:
             return
 
+        # Clear input
         self.entry.delete(0, "end")
-        self.append_message("You", user_text)
-        self.set_status("Dharampal is thinking...")
 
+        # Show user message
+        self.add_user_message(user_text)
+
+        # Update status
+        self.set_status("Thinking...", "busy")
+        self._disable_input()
+
+        # Process in background
         threading.Thread(
             target=self._process_message, args=(user_text,), daemon=True
         ).start()
 
     def _process_message(self, msg):
+        """Process message in background thread."""
         try:
             response = get_response(msg)
-            self.append_message("Dharampal", response)
-            self.set_status(f"Model '{MODEL_IDENTIFIER}' ready.")
+            self.add_ai_message(response)
+            self.set_status("Ready", "ready")
         except Exception as e:
-            self.append_message("System Error", str(e))
-            self.set_status("Error — see chat.")
+            self.add_error_message(str(e))
+            self.set_status("Error occurred", "error")
+        finally:
+            self._enable_input()
 
 
 def run_app():
-    ctk.set_appearance_mode("System")
-    ctk.set_default_color_theme("blue")
-    app = ChatWindow()
+    """Launch the modern chat application."""
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("dark-blue")
+
+    app = ModernChatWindow()
     app.mainloop()
 
 
