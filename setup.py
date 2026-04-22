@@ -11,6 +11,8 @@ setup(
         "customtkinter",
         "requests",
         "beautifulsoup4",
+        "chromadb",
+        "dateparser",
     ],
     entry_points={
         "console_scripts": [
