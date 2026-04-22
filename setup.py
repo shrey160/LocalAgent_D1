@@ -10,10 +10,11 @@ setup(
         "langgraph",
         "customtkinter",
         "requests",
+        "beautifulsoup4",
     ],
     entry_points={
         "console_scripts": [
             "dharampal=dharampal.cli:main",
         ]
-    }
+    },
 )
