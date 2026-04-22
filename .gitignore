@@ -1,1 +1,4 @@
 venv/
+
+.graphify_cached.json
+.graphify_uncached.txt
