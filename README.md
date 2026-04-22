@@ -14,8 +14,9 @@ A modular desktop AI agent for Windows that brings together a local LLM, intelli
 - 📰 **Smart News** — Fetches yesterday's + day before yesterday's space news automatically
 - 🔍 **RAG Search** — Ask for news from any date; searches local cache first, then scrapes if needed
 - 💼 **Trading Updates** — Live financial headlines from TradingEconomics
+- 🎮 **Tic-Tac-Toe** — Built-in game: you play as X, AI plays as O
 - 💾 **Persistent Memory** — Articles stored in ChromaDB with Ollama embeddings
-- 🖥️ **Native UI** — Clean customtkinter chat window
+- 🖥️ **Native UI** — Clean customtkinter chat window with floating widget
 - ⚡ **Tool Routing** — LLM automatically decides which tool to use based on your question
 
 ---
@@ -72,6 +73,7 @@ User Output (Chat UI)
 | **RAG Search** | `dharampal/tools/news_search.py` | ChromaDB historical search |
 | **Web Scraper** | `dharampal/tools/news_scraper.py` | Fallback for historical dates |
 | **Sources Info** | `dharampal/tools/list_sources.py` | Show sources and cache status |
+| **Tic-Tac-Toe** | `dharampal/tools/tictactoe.py` | In-chat game (user X, AI O) |
 | **Vector Store** | `dharampal/storage/chroma_store.py` | ChromaDB wrapper |
 | **Embeddings** | `dharampal/embeddings.py` | Ollama nomic-embed-text client |
 
@@ -253,7 +255,7 @@ The window will show 'waiting for model' until LM Studio finishes loading.
 Run 'dharampal stop' when you're done.
 ```
 
-A chat window opens. The input is disabled until the model loads (usually 10-30 seconds).
+A chat window opens with a floating widget button. The input is ready immediately — type while the model loads in the background.
 
 ### Stop the Agent
 
@@ -285,6 +287,7 @@ The agent understands natural language. No special commands needed — just ask:
 | "Trading news" | Live financial headlines from TradingEconomics |
 | "News for April 21st" | Searches local cache first, offers to scrape if empty |
 | "Show sources" | Lists all sources and cache status |
+| "Play tic tac toe" | Starts a game — you are X, AI is O |
 | "What satellites launched recently?" | General chat with the LLM |
 
 ---
@@ -361,6 +364,41 @@ SpaceNews articles from April 21, 2026:
 
 (I've saved 2 new article(s) to my local memory.)
 ```
+
+### Tic-Tac-Toe
+
+**You:** Let's play tic tac toe
+
+**Dharampal:**
+```
+Let's play Tic-Tac-Toe!
+
+You are X, I am O. Pick a number (1-9) to place your mark.
+
+ 1 | 2 | 3
+---+---+---
+ 4 | 5 | 6
+---+---+---
+ 7 | 8 | 9
+```
+
+**You:** 5
+
+**Dharampal:**
+```
+ 1 | 2 | 3
+---+---+---
+ 4 | X | 6
+---+---+---
+ 7 | 8 | 9
+
+I place O on 1. Your turn!
+Pick an empty square (1-9).
+```
+
+**You:** yes *(after game ends)*
+
+**Dharampal:** *(starts a new game)*
 
 ### List Sources
 
@@ -442,6 +480,12 @@ python -m dharampal.ui.chat_window
 3. First load of a multi-GB model can take 5-10 minutes
 4. Check LM Studio GUI for errors
 
+### Input not responding during game
+
+**Cause:** Rare threading issue where processing indicator gets stuck.
+
+**Fix:** The input field is never disabled — you can always type. If the Send button is grayed out, wait for the "⚡ Processing..." indicator to disappear (max 30 seconds). If still stuck, close and reopen the chat window.
+
 ### Chat window opens but greeting fails with model error
 
 **Cause:** Model loaded under a different identifier.
@@ -482,7 +526,8 @@ dharampal_1/
 │   ├── agent/
 │   │   └── graph.py        # LangGraph + tool binding
 │   ├── ui/
-│   │   └── chat_window.py  # customtkinter interface
+│   │   ├── chat_window.py  # customtkinter chat interface
+│   │   └── floating_widget.py  # Draggable floating button
 │   ├── storage/
 │   │   └── chroma_store.py # ChromaDB wrapper
 │   └── tools/
@@ -491,7 +536,8 @@ dharampal_1/
 │       ├── trading_news.py # TradingEconomics scraper
 │       ├── news_search.py  # RAG search
 │       ├── news_scraper.py # Historical scraper
-│       └── list_sources.py # Sources info
+│       ├── list_sources.py # Sources info
+│       └── tictactoe.py    # Tic-Tac-Toe game
 ├── notebook/
 │   └── test_tools.ipynb    # Jupyter test notebook
 ├── data/                   # ChromaDB storage (auto-created)
@@ -546,7 +592,7 @@ python -c "from dharampal.tools.space_news import space_news_tool; print(space_n
 
 ## Roadmap
 
-### Completed (Phase 1-2)
+### Completed (Phase 1-3)
 - ✅ Core chat agent with LangGraph
 - ✅ customtkinter UI with model polling
 - ✅ CLI start/stop lifecycle
@@ -556,6 +602,9 @@ python -c "from dharampal.tools.space_news import space_news_tool; print(space_n
 - ✅ Tool registry system
 - ✅ Ollama embeddings
 - ✅ Anti-hallucination prompts
+- ✅ Tic-Tac-Toe game tool
+- ✅ Floating widget (minimize/maximize)
+- ✅ Robust input handling (never disabled)
 
 ### Planned (Phase 3+)
 - 🔄 Auto-discovery of tools from filesystem

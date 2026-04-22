@@ -10,6 +10,7 @@ from dharampal.tools.news_search import search_historical_news
 from dharampal.tools.news_scraper import scrape_historical_news
 from dharampal.tools.trading_news import trading_news_tool
 from dharampal.tools.list_sources import list_sources_tool
+from dharampal.tools.tictactoe import tictactoe_tool
 
 ALL_TOOLS = [
     space_news_tool,
@@ -17,6 +18,7 @@ ALL_TOOLS = [
     scrape_historical_news,
     trading_news_tool,
     list_sources_tool,
+    tictactoe_tool,
 ]
 
 __all__ = [
@@ -26,4 +28,5 @@ __all__ = [
     "scrape_historical_news",
     "trading_news_tool",
     "list_sources_tool",
+    "tictactoe_tool",
 ]

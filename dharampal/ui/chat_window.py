@@ -169,10 +169,24 @@ class ModernChatWindow(ctk.CTk):
         self.send_btn.grid(row=0, column=1, padx=(0, 15), pady=15)
         self.send_btn.configure(state="disabled")
 
+        # Processing indicator (hidden by default)
+        self.processing_label = ctk.CTkLabel(
+            self.input_frame,
+            text="",
+            font=("Segoe UI", 10),
+            text_color=COLORS["status_busy"],
+        )
+        self.processing_label.grid(
+            row=1, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 5)
+        )
+
         # Show initial system message
         self.add_system_message(
             "Dharampal is starting up. Waiting for LM Studio to load the model..."
         )
+
+        # Initialize processing flag
+        self._is_processing = False
 
         # Start background thread
         threading.Thread(target=self._startup_sequence, daemon=True).start()
@@ -304,27 +318,6 @@ class ModernChatWindow(ctk.CTk):
 
         self.status_dot.configure(text_color=color)
 
-    def _enable_input(self):
-        """Enable input field and button."""
-
-        def _do():
-            self.entry.configure(
-                state="normal", placeholder_text="Type your message..."
-            )
-            self.send_btn.configure(state="normal")
-            self.entry.focus_set()
-
-        self.after(0, _do)
-
-    def _disable_input(self):
-        """Disable input field and button."""
-
-        def _do():
-            self.entry.configure(state="disabled")
-            self.send_btn.configure(state="disabled")
-
-        self.after(0, _do)
-
     # --- Startup Sequence ---
 
     def _wait_for_model(self, timeout=READINESS_TIMEOUT_SECONDS):
@@ -356,6 +349,18 @@ class ModernChatWindow(ctk.CTk):
             time.sleep(2)
         return False
 
+    def _enable_entry(self):
+        """Enable the entry field for user input."""
+
+        def _do():
+            self.entry.configure(
+                state="normal", placeholder_text="Type your message..."
+            )
+            self.send_btn.configure(state="normal")
+            self.entry.focus_set()
+
+        self.after(0, _do)
+
     def _startup_sequence(self):
         """Initialize the agent and show greeting."""
         ready = self._wait_for_model()
@@ -365,11 +370,11 @@ class ModernChatWindow(ctk.CTk):
             self.add_error_message(
                 "Model did not become ready in time. Input is enabled but may fail."
             )
-            self._enable_input()
+            self._enable_entry()
             return
 
         self.set_status(f"Ready", "ready")
-        self._enable_input()
+        self._enable_entry()
 
         try:
             greeting = get_response(
@@ -383,11 +388,13 @@ class ModernChatWindow(ctk.CTk):
 
     def send_message(self, event=None):
         """Send user message and get AI response."""
-        if str(self.send_btn.cget("state")) == "disabled":
-            return
-
         user_text = self.entry.get().strip()
         if not user_text:
+            return
+
+        # Check if already processing
+        if self._is_processing:
+            self.add_system_message("Still processing previous message. Please wait...")
             return
 
         # Clear input
@@ -396,26 +403,104 @@ class ModernChatWindow(ctk.CTk):
         # Show user message
         self.add_user_message(user_text)
 
-        # Update status
+        # Update status and show processing indicator
         self.set_status("Thinking...", "busy")
-        self._disable_input()
+        self._is_processing = True
+        self._show_processing_indicator(True)
 
-        # Process in background
-        threading.Thread(
-            target=self._process_message, args=(user_text,), daemon=True
-        ).start()
+        # Process in background thread
+        def _background_process():
+            try:
+                self._process_message(user_text)
+            except Exception as e:
+                import traceback
+
+                print(f"[CHAT ERROR] Background thread exception: {e}")
+                traceback.print_exc()
+            finally:
+                self._processing_complete()
+
+        threading.Thread(target=_background_process, daemon=True).start()
 
     def _process_message(self, msg):
-        """Process message in background thread."""
+        """Process message in background thread with timeout safety."""
+        import traceback
+
+        response = None
+        error_occurred = False
+
         try:
-            response = get_response(msg)
-            self.add_ai_message(response)
-            self.set_status("Ready", "ready")
+            print(f"[CHAT] Processing message: {msg!r}")
+
+            # Use a thread with timeout to prevent hanging
+            response_container = [None]
+            exception_container = [None]
+
+            def _get_response_with_timeout():
+                try:
+                    response_container[0] = get_response(msg)
+                except Exception as e:
+                    exception_container[0] = e
+
+            # Start the response thread
+            response_thread = threading.Thread(
+                target=_get_response_with_timeout, daemon=True
+            )
+            response_thread.start()
+
+            # Wait with timeout (30 seconds max)
+            response_thread.join(timeout=30.0)
+
+            if response_thread.is_alive():
+                # Thread is still running after timeout
+                print("[CHAT ERROR] get_response timed out after 30 seconds")
+                self.add_error_message(
+                    "Request timed out. The model is taking too long to respond."
+                )
+                self.set_status("Timeout", "error")
+                error_occurred = True
+            elif exception_container[0] is not None:
+                # An exception occurred
+                raise exception_container[0]
+            else:
+                # Success
+                response = response_container[0]
+                print(f"[CHAT] Got response: {response[:100]!r}...")
+                self.add_ai_message(response)
+                self.set_status("Ready", "ready")
+
         except Exception as e:
-            self.add_error_message(str(e))
+            error_msg = f"{type(e).__name__}: {e}"
+            self.add_error_message(error_msg)
             self.set_status("Error occurred", "error")
+            # Log full traceback
+            traceback_str = traceback.format_exc()
+            print(f"[CHAT ERROR] {error_msg}\n{traceback_str}")
+            error_occurred = True
         finally:
-            self._enable_input()
+            print("[CHAT] Processing complete")
+            if error_occurred:
+                print("[CHAT] An error occurred during processing")
+
+    def _show_processing_indicator(self, show=True):
+        """Show or hide the processing indicator."""
+
+        def _do():
+            if show:
+                self.processing_label.configure(text="⚡ Processing...")
+                self.send_btn.configure(state="disabled")
+            else:
+                self.processing_label.configure(text="")
+                self.send_btn.configure(state="normal")
+                self.entry.focus_set()
+
+        self.after(0, _do)
+
+    def _processing_complete(self):
+        """Called when processing is complete."""
+        self._is_processing = False
+        self._show_processing_indicator(False)
+        print("[CHAT] Processing complete, input remains enabled")
 
 
 def run_app():

@@ -24,6 +24,7 @@ User Input (Chat UI / CLI)
     |         +---> Historical Search (ChromaDB RAG)
     |         +---> List Sources (info tool)
     |         +---> Web Scraper (fallback for historical)
+    |         +---> Tic-Tac-Toe (in-chat game)
     |
     +---> LLM Backend (LM Studio)
     |         |
@@ -50,11 +51,23 @@ User Output (Chat UI)
 #### 2. Chat Interface (`dharampal/ui/chat_window.py`)
 - **Framework**: customtkinter
 - **Features**:
-  - Three-row layout: chat history, input field, status bar
-  - Input disabled until model is reachable
+  - Three-row layout: header, chat history, input area
+  - Input field **never disabled** — always ready for typing
+  - Processing indicator ("⚡ Processing...") shows while LLM responds
+  - Send button disabled during processing only
+  - 30-second timeout protection against hung LLM calls
   - Auto-polls LM Studio every 2s (up to 10 min)
   - Background threading for non-blocking responses
   - Thread-safe UI updates via `after(0, ...)`
+
+#### 3. Floating Widget (`dharampal/ui/floating_widget.py`)
+- **Framework**: customtkinter + Windows API
+- **Features**:
+  - Square button (60×60px) at bottom-right corner
+  - Draggable anywhere on screen
+  - Left-click: minimize/restore chat window
+  - Right-click: context menu (hide, exit)
+  - Uses `FindWindowW` to locate chat window by title
 
 #### 3. Agent Graph (`dharampal/agent/graph.py`)
 - **Framework**: LangGraph
@@ -84,6 +97,7 @@ User Output (Chat UI)
 | `search_historical_news` | `news_search.py` | ChromaDB | N/A | "News for April 21st" - searches local RAG |
 | `scrape_historical_news` | `news_scraper.py` | SpaceNews | Yes (stores after scrape) | Fallback when user wants to check online |
 | `list_sources_tool` | `list_sources.py` | Info | N/A | "Show sources" - lists sources and cache status |
+| `tictactoe_tool` | `tictactoe.py` | In-memory | N/A | "Play tic tac toe" - user X, AI O, board 1-9 |
 
 **Tool Implementation Details**:
 - All tools use `@tool` decorator from LangChain
@@ -169,6 +183,37 @@ chatbot node (formats response)
 User sees web results (now cached for future)
 ```
 
+#### Tic-Tac-Toe Flow
+```
+User: "Let's play tic tac toe"
+    |
+    v
+chatbot node (LLM detects game intent)
+    |
+    v
+tictactoe_tool.invoke(move="")
+    |
+    +---> Initialize new game (board 1-9)
+    +---> User is X, AI is O
+    +---> Return formatted board
+    |
+    v
+User: "5"
+    |
+    v
+tictactoe_tool.invoke(move="5")
+    |
+    +---> Place X at position 5
+    +---> Check win/draw
+    +---> AI calculates move (win/block/center/corner)
+    +---> Place O
+    +---> Check win/draw
+    +---> Return updated board
+    |
+    v
+Game ends → user says "yes" → new game starts
+```
+
 #### Trading News Flow
 ```
 User: "Get trading news"
@@ -228,7 +273,8 @@ dharampal_1/
     │   └── graph.py           # LangGraph definition + tool binding
     ├── ui/
     │   ├── __init__.py
-    │   └── chat_window.py     # customtkinter chat interface
+    │   ├── chat_window.py     # customtkinter chat interface
+    │   └── floating_widget.py # Floating minimize/restore button
     ├── storage/
     │   ├── __init__.py
     │   └── chroma_store.py    # ChromaDB wrapper
@@ -238,7 +284,8 @@ dharampal_1/
         ├── trading_news.py    # TradingEconomics scraper (live)
         ├── news_search.py     # Historical RAG search
         ├── news_scraper.py    # Historical web scraper
-        └── list_sources.py    # Sources info tool
+        ├── list_sources.py    # Sources info tool
+        └── tictactoe.py       # Tic-Tac-Toe game
 ```
 
 ### Implementation Phases
@@ -261,7 +308,14 @@ dharampal_1/
 - [x] Tool registry pattern
 - [x] Anti-hallucination system prompt rules
 
-#### Phase 3 - Future Enhancements (PLANNED)
+#### Phase 3 - UI Polish & Games (COMPLETED)
+- [x] Tic-Tac-Toe game tool
+- [x] Floating widget (minimize/maximize chat)
+- [x] Robust input handling (never disabled, visual indicator)
+- [x] 30-second timeout protection
+- [x] Processing indicator instead of disabled input
+
+#### Phase 4 - Future Enhancements (PLANNED)
 - [ ] Plugin/tool auto-discovery from `dharampal/tools/`
 - [ ] Streaming token-by-token output in UI
 - [ ] Model picker dropdown in chat window
@@ -285,6 +339,10 @@ dharampal_1/
 6. **Tool-calling over intent detection**: The LLM decides when to invoke tools based on user intent, rather than hardcoded keyword matching. More flexible and natural.
 
 7. **No storage for trading news**: Trading data is time-sensitive and changes rapidly. Caching would provide stale information.
+
+8. **Never disable input field**: Instead of disabling the text entry (which can get stuck if threads hang), the UI shows a visual "⚡ Processing..." indicator and only disables the Send button. The user can always type, and if they press Enter while processing, they get a friendly "please wait" message.
+
+9. **30-second timeout on LLM calls**: All `get_response()` calls are wrapped in a thread with a 30-second timeout. If the LLM hangs (e.g., during tool calls), the UI recovers gracefully instead of freezing permanently.
 
 ### Testing Strategy
 
